@@ -19,3 +19,6 @@ __pycache__/
 
 # Локальный индекс code-index daemon (создаётся когда папка добавлена в daemon.toml)
 .code-index/
+
+# Локальные файлы Claude Code harness
+.claude/
