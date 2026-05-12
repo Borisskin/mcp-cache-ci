@@ -30,10 +30,6 @@ jobs:
             os: ubuntu-latest
             archive: tar.gz
             bin_ext: ''
-          - target: x86_64-apple-darwin
-            os: macos-13
-            archive: tar.gz
-            bin_ext: ''
           - target: aarch64-apple-darwin
             os: macos-latest
             archive: tar.gz
