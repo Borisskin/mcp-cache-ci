@@ -1,0 +1,21 @@
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE
+.idea/
+.vscode/
+
+# Локальные конфиги — пользователь правит свои, не коммитим
+config/local.toml
+config/*.local.toml
+
+# Логи
+*.log
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Локальный индекс code-index daemon (создаётся когда папка добавлена в daemon.toml)
+.code-index/

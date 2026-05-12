@@ -1,0 +1,27 @@
+# Пример конфига для mcp-cache-ci.
+# Скопируй как `cache-ci.toml` рядом и правь под свою машину.
+# Любые поля можно перебить через ENV (`MCP_CACHE_*`) или CLI-флаги.
+#
+# ⚠️ TOML-нюанс: все ключи верхнего уровня (`policy_path` и т.п.) должны идти
+# ДО первой `[секции]`. Иначе TOML-парсер считает их частью предыдущей секции.
+
+# Политика TTL по tool'ам — относительно каталога этого конфига или абсолютный.
+policy_path = "cache_policy_ci.toml"
+
+[server]
+bind_host = "127.0.0.1"
+bind_port = 8013                             # порт прокси: 8013 (зарезервирован под кэш-ci)
+
+[backend]
+url = "http://127.0.0.1:8011/mcp"            # на VM200: http://127.0.0.1:8011/mcp (локально)
+timeout_ms = 5000
+
+[cache]
+max_entries = 10000
+max_memory_mb = 200
+default_ttl_seconds = 600
+evict_interval_seconds = 60
+
+[health]
+interval_s = 30
+backend_timeout_ms = 2000

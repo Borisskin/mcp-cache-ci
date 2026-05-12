@@ -1,0 +1,70 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cache-core",
+    "crates/mcp-cache-ci",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+description = "Caching MCP proxy in front of code-index with event-based invalidation"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+
+# MCP протокол: и серверная (для обслуживания клиента), и клиентская
+# (для форвардинга запросов на бэкенд) части. Reqwest-фича даёт готовый
+# StreamableHttpClientTransport::from_uri(...).
+rmcp = { version = "1.3", features = [
+    "server",
+    "client",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "macros",
+] }
+
+# HTTP
+axum = "0.8"
+tower = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+# Concurrent in-memory cache
+dashmap = "6"
+
+# Конфиг
+toml = "0.8"
+
+# Сериализация
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Утилиты
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+arc-swap = "1"
+futures-util = "0.3"
+sha2 = "0.10"
+hex = "0.4"
+async-trait = "0.1"
+
+# Логи
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Тесты
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,50 @@
+# Политика TTL по tool'ам code-index.
+# Имена tool'ов — без префикса `mcp__ci__`, потому что прокси видит «голое» имя
+# из tools/call.
+
+# TTL по умолчанию для tool'ов, которые здесь не упомянуты явно.
+# 0 — значит non-cacheable.
+default_ttl_seconds = 600
+
+# FTS-результаты — детерминированы, пока индекс не обновлён.
+[tools.search_function]
+ttl_seconds = 3600
+
+[tools.search_class]
+ttl_seconds = 3600
+
+[tools.find_symbol]
+ttl_seconds = 3600
+
+[tools.get_function]
+ttl_seconds = 3600
+
+[tools.get_class]
+ttl_seconds = 3600
+
+[tools.get_imports]
+ttl_seconds = 3600
+
+[tools.get_file_summary]
+ttl_seconds = 1800
+
+[tools.get_callers]
+ttl_seconds = 1800
+
+[tools.get_callees]
+ttl_seconds = 1800
+
+# Поиск по подстроке: чуть короче, у больших регексов фильтрация может меняться.
+[tools.grep_body]
+ttl_seconds = 600
+
+[tools.search_text]
+ttl_seconds = 600
+
+# Статистика — быстро меняется при индексации.
+[tools.get_stats]
+ttl_seconds = 60
+
+# Healthcheck кэшировать незачем.
+[tools.health]
+cacheable = false

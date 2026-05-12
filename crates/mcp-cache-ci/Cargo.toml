@@ -1,0 +1,27 @@
+[package]
+name = "mcp-cache-ci"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Кэширующий MCP-прокси перед code-index serve"
+
+[[bin]]
+name = "mcp-cache-ci"
+path = "src/main.rs"
+
+[dependencies]
+cache-core = { path = "../cache-core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+rmcp = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+arc-swap = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
