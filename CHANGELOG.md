@@ -4,6 +4,29 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/), версионирование по [SemVer](https://semver.org/lang/ru/).
 
+## [0.3.0] — 2026-05-14
+
+### Изменено
+
+- **Streamable HTTP — stateless mode by default.** Сервер переключён с `LocalSessionManager` на `NeverSessionManager` + `StreamableHttpServerConfig::with_stateful_mode(false)`. Заголовок `Mcp-Session-Id` от клиента **игнорируется**: любой клиент с любым (или пустым) session_id обслуживается без enforcement'а.
+- **`with_json_response(true)`** — ответы отдаются как `Content-Type: application/json` вместо `text/event-stream`. Меньше overhead'а, нет SSE-framing'а — кеш-прокси не инициирует server-sent уведомлений, только отвечает на `tools/call`.
+
+### Совместимость
+
+- **Breaking — но узко**: в stateless-режиме rmcp **не поддерживает** `DELETE /mcp` (close session) и `GET /mcp` (standalone SSE stream). Эти методы вернут `405 Method Not Allowed`. Влияет только на клиентов, которые **явно** делают session-lifecycle (mainstream MCP-клиенты — VSCode `claude-code` extension, `claude` CLI, `mcp-cli` — не используют DELETE/GET, работают только через `POST /mcp` для `initialize` и `tools/call` → совместимость сохраняется).
+- **`POST /mcp` (initialize, tools/list, tools/call)** работает идентично 0.2.x. Клиент при `initialize` получает 200 OK с `result.serverInfo` без `Mcp-Session-Id` в response header — это валидное поведение per spec MCP 2025-06-18.
+- **Cache key format** не изменился: `{server_alias}|{scope}|{tool}|{sha256(normalize(args))}`. Все накопленные кеши совместимы с новой версией, очистка не требуется.
+
+### Архитектура
+
+- Stateful-режим в rmcp хранит `Mcp-Session-Id → state` (per-session worker'ы, SSE-кэш, in-flight router) **только в памяти**. Любой рестарт прокси (supervisor-respawn, ребут, ручной рестарт) или TTL-инвалидация по `SessionConfig::keep_alive` (default 5 минут) делают все ранее выданные session_id невалидными — следующий запрос клиента возвращает `404 Session not found`. Клиенты обязаны выполнять auto-reinit на 404 (повторный `initialize`, retry с новым session_id); часть существующих MCP-клиентов (включая VSCode extension `anthropic.claude-code` 2.1.141) этого не делает и требует ручного Reconnect — мажорная UX-проблема.
+- Для кеш-прокси session_id концептуально избыточен: кеш-ключ строится по `(server_alias, scope, tool, sha256(args))`, **никакого state per-client** мы не храним. Stateless-режим устраняет источник нестабильности «404 после рестарта», сохраняя весь функционал (cache hits, TTL, single-flight, invalidation, freeze/thaw, reverse_index, metrics).
+- Бонус: убрана session-cleanup нагрузка (фоновый таск `evict_expired_channels`), снижено потребление памяти при большом числе клиентов.
+
+### Workspace
+
+- Workspace version bumped 0.2.2 → **0.3.0** (minor — breaking узко для DELETE/GET).
+
 ## [0.2.2] — 2026-05-12
 
 ### Изменено

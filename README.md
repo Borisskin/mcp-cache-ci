@@ -4,6 +4,8 @@
 
 Caching MCP proxy in front of the [code-index](https://github.com/Regsorm/code-index-mcp) server with event-based invalidation.
 
+> Despite the `-ci` suffix, the binary is a **generic caching proxy for any MCP server that speaks Streamable HTTP**. You can deploy it in front of any backend (`code-index`, `rag-query`, `1c-router`, your own MCP server, …) by changing only the config file: `[backend].url` plus per-tool TTL/cacheable rules in `cache_policy_*.toml`. The `server_alias` constant (currently `"ci"`) gets baked into the cache key prefix — it stays the same regardless of which backend you wire up.
+
 ## Why
 
 `code-index` answers MCP tool calls from a local SQLite index. Even with a fast SQLite, each call is still a network round-trip MCP → JSON → SQLite → JSON → MCP. In hot scenarios (repeated `grep_body`, `search_function` within a session) an in-memory cache in front of the backend turns tens of milliseconds into microseconds.
@@ -98,6 +100,16 @@ Primary use case — federated repos under concurrent edits (when event-driven i
 |---|---|
 | `≥ 0.9.0` | Full event-based invalidation. Backend returns `_meta.dependent_files`, cache-ci registers `cache_key → file_paths` in `reverse_index`. After re-indexing a file the daemon sends `POST /invalidate {file_paths}` — targeted eviction. |
 | `< 0.9.0` | TTL fallback only. `_meta.dependent_files` is missing → `reverse_index` stays empty → targeted invalidation is inactive, cache lives by TTL. |
+
+## MCP transport: stateless mode
+
+Since **0.3.0** the Streamable HTTP server runs in **stateless mode** (`StreamableHttpServerConfig::with_stateful_mode(false)` + `NeverSessionManager`). The `Mcp-Session-Id` header sent by a client is ignored — every request is served regardless of session state.
+
+**Rationale.** This proxy's cache key is `{server_alias}|{scope}|{tool}|{sha256(args)}` — `session_id` was never part of it, so per-client state was unnecessary. In stateful mode rmcp keeps the session map in memory only: any proxy restart (manual, supervisor respawn) or TTL eviction (`SessionConfig::keep_alive`, 5 min default) invalidates every previously-issued session_id, so the next client request returns `404 Session not found`. Mainstream MCP clients (the VSCode `claude-code` extension, the `claude` CLI, the MCP SDKs) do **not** auto-reinit on 404 — the user has to hit "Reconnect" manually. Stateless removes this failure mode entirely.
+
+**What still works:** `POST /mcp` with `initialize`, `tools/list`, `tools/call` — identical behaviour to 0.2.x. Cache hits, TTL, single-flight, invalidation, freeze/thaw, reverse_index, metrics — unchanged.
+
+**What no longer works:** `DELETE /mcp` (close session) and `GET /mcp` (standalone SSE stream) return `405 Method Not Allowed`. These are session-lifecycle operations only — proxy clients that just call tools won't hit them.
 
 ## Metrics
 

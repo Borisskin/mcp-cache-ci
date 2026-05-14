@@ -2,6 +2,8 @@
 
 [English version](README.md)
 
+> Несмотря на суффикс `-ci`, бинарник — **универсальный кеш-прокси перед любым MCP-сервером с транспортом Streamable HTTP**. Развернуть перед любым backend'ом (`code-index`, `rag-query`, `1c-router`, ваш собственный MCP-сервер, …) можно правкой только конфига: `[backend].url` плюс per-tool политика TTL/cacheable в `cache_policy_*.toml`. Константа `server_alias` (сейчас `"ci"`) попадает в префикс ключа кеша — она остаётся прежней независимо от подключённого backend'а.
+
 Кэширующий MCP-прокси перед сервером [code-index](https://github.com/Regsorm/code-index-mcp) с событийной (event-based) инвалидацией.
 
 ## Зачем
@@ -98,6 +100,16 @@ cacheable = false  # все запросы по repo=ut идут direct чере
 |---|---|
 | `≥ 0.9.0` | Полная event-based инвалидация. Бэкенд возвращает `_meta.dependent_files`, cache-ci регистрирует `cache_key → file_paths` в reverse_index. После переиндексации файла daemon шлёт `POST /invalidate {file_paths}` — точечный снос. |
 | `< 0.9.0` | Только TTL fallback. `_meta.dependent_files` отсутствует → reverse_index пустой → точечная инвалидация не активна, кэш живёт по TTL. |
+
+## MCP transport: stateless mode
+
+Начиная с **0.3.0** Streamable HTTP-сервер работает в **stateless-режиме** (`StreamableHttpServerConfig::with_stateful_mode(false)` + `NeverSessionManager`). Заголовок `Mcp-Session-Id` от клиента **игнорируется** — каждый запрос обслуживается независимо от session state.
+
+**Обоснование.** Ключ кэша этого прокси — `{server_alias}|{scope}|{tool}|{sha256(args)}` — `session_id` никогда не был его частью, per-client state нам не нужен. В stateful-режиме rmcp хранит session map **только в памяти**: любой рестарт прокси (ручной, supervisor-respawn) или TTL-инвалидация (`SessionConfig::keep_alive`, default 5 мин) делают все ранее выданные session_id невалидными — следующий запрос клиента возвращает `404 Session not found`. Массовые MCP-клиенты (VSCode-расширение `claude-code`, CLI `claude`, MCP-SDK) **не делают auto-reinit на 404** — пользователю приходится вручную жать «Reconnect». Stateless полностью устраняет этот класс отказов.
+
+**Что продолжает работать:** `POST /mcp` с `initialize`, `tools/list`, `tools/call` — поведение идентично 0.2.x. Cache hits, TTL, single-flight, инвалидация, freeze/thaw, reverse_index, метрики — без изменений.
+
+**Что больше не работает:** `DELETE /mcp` (закрытие сессии) и `GET /mcp` (standalone SSE stream) возвращают `405 Method Not Allowed`. Это операции session-lifecycle — клиенты, которые просто вызывают tools, их не используют.
 
 ## Метрики
 
