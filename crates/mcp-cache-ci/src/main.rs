@@ -24,7 +24,7 @@ use axum::{
 };
 use clap::Parser;
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    session::never::NeverSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use tracing::{info, warn};
 
@@ -106,12 +106,21 @@ async fn main() -> Result<()> {
         proxy.clone(),
         tools,
     );
-    let session_manager = Arc::new(LocalSessionManager::default());
+    // Stateless mode — кеш-прокси хеширует по (tool_name, args), session_id
+    // в ключах не участвует. with_stateful_mode(false) + NeverSessionManager
+    // полностью отключают session enforcement: сервер игнорирует Mcp-Session-Id,
+    // никаких 404 «Session not found» при рестарте процесса / TTL не возникает.
+    // json_response=true — отдаём application/json вместо text/event-stream:
+    // меньше overhead'а, у нас нет server-initiated notifications (только
+    // ответы на tool-call).
+    let session_manager = Arc::new(NeverSessionManager::default());
     let svc_factory = {
         let proxy_server = proxy_server.clone();
         move || Ok(proxy_server.clone())
     };
-    let mut http_config = StreamableHttpServerConfig::default();
+    let mut http_config = StreamableHttpServerConfig::default()
+        .with_stateful_mode(false)
+        .with_json_response(true);
     if let Some(hosts) = &cfg.server.allowed_hosts {
         tracing::info!(allowed_hosts = ?hosts, "переопределяю allowed_hosts из конфига");
         http_config = http_config.with_allowed_hosts(hosts.clone());
