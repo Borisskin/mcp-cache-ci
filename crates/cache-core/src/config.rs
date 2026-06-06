@@ -91,6 +91,24 @@ pub struct CacheConfig {
     /// Период фоновой эвикции протухших записей, сек. 0 — отключить.
     #[serde(default = "default_evict_interval_seconds")]
     pub evict_interval_seconds: u64,
+    /// Write-triggered ленивая ревалидация (#1471). При `true` прокси учитывает
+    /// сигналы `POST /mark-dirty` от демона и сверяет mtime перед запоминанием
+    /// ответа. `false` — старое поведение (только TTL + `POST /invalidate`).
+    #[serde(default = "default_lazy_revalidation_enabled")]
+    pub lazy_revalidation_enabled: bool,
+    /// Бюджет ожидания догона индекса для грязного чтения (strong-режим), мс.
+    /// За это время прокси ретраит форвард, пока `index_mtime >= observed`.
+    /// `0` → eventual: один форвард, без ретраев (в окне отдаём как есть, не
+    /// кэшируя). По исчерпании бюджета — мягкий фолбэк (отдать без запоминания).
+    #[serde(default = "default_revalidation_max_wait_ms")]
+    pub revalidation_max_wait_ms: u64,
+    /// Пауза между ретраями форварда в strong-режиме, мс.
+    #[serde(default = "default_revalidation_retry_interval_ms")]
+    pub revalidation_retry_interval_ms: u64,
+    /// TTL флага грязного пути, сек — страховка от утечки, если по пути так и не
+    /// пришло чтение (обычно флаг снимается сверкой mtime на первом же чтении).
+    #[serde(default = "default_dirty_ttl_seconds")]
+    pub dirty_ttl_seconds: u64,
 }
 
 impl Default for CacheConfig {
@@ -100,8 +118,25 @@ impl Default for CacheConfig {
             max_memory_mb: default_max_memory_mb(),
             default_ttl_seconds: default_ttl_seconds(),
             evict_interval_seconds: default_evict_interval_seconds(),
+            lazy_revalidation_enabled: default_lazy_revalidation_enabled(),
+            revalidation_max_wait_ms: default_revalidation_max_wait_ms(),
+            revalidation_retry_interval_ms: default_revalidation_retry_interval_ms(),
+            dirty_ttl_seconds: default_dirty_ttl_seconds(),
         }
     }
+}
+
+fn default_lazy_revalidation_enabled() -> bool {
+    true
+}
+fn default_revalidation_max_wait_ms() -> u64 {
+    2000
+}
+fn default_revalidation_retry_interval_ms() -> u64 {
+    150
+}
+fn default_dirty_ttl_seconds() -> u64 {
+    300
 }
 
 fn default_max_entries() -> usize {

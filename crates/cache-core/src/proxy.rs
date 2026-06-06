@@ -19,6 +19,7 @@ use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::cache::Cache;
+use crate::dirty::DirtySet;
 use crate::freeze::FreezeController;
 use crate::metrics::Metrics;
 use crate::policy::Policy;
@@ -53,6 +54,29 @@ pub trait BackendCaller: Send + Sync + 'static {
     async fn call(&self, tool: &str, args: &Value) -> Result<String, String>;
 }
 
+/// Параметры write-triggered ленивой ревалидации (#1471).
+#[derive(Debug, Clone)]
+pub struct RevalConfig {
+    /// Учитывать ли dirty-флаги и сверять mtime перед запоминанием ответа.
+    /// `false` — старое поведение (только TTL + `POST /invalidate`).
+    pub enabled: bool,
+    /// Бюджет ожидания догона индекса для грязного чтения (strong-режим).
+    /// `0` → eventual: один форвард без ретраев.
+    pub max_wait: Duration,
+    /// Пауза между ретраями форварда в strong-режиме.
+    pub retry_interval: Duration,
+}
+
+impl Default for RevalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_wait: Duration::from_millis(2000),
+            retry_interval: Duration::from_millis(150),
+        }
+    }
+}
+
 /// Кэш-прокси: связывает кэш, политику, single-flight и backend-caller.
 ///
 /// `scope_arg_name` — имя поля в args, по которому строится scope-prefix кэш-ключа
@@ -68,6 +92,12 @@ pub struct CacheProxy<B: BackendCaller> {
     pub metrics: Arc<Metrics>,
     pub backend: Arc<B>,
     pub freeze: FreezeController,
+    /// Множество грязных путей для ленивой ревалидации (#1471). Наполняется
+    /// `POST /mark-dirty`; используется в `handle` для решения «отдать из кэша
+    /// или форварднуть и сверить mtime».
+    pub dirty: Arc<DirtySet>,
+    /// Параметры ленивой ревалидации.
+    pub reval: RevalConfig,
 }
 
 impl<B: BackendCaller> CacheProxy<B> {
@@ -81,6 +111,8 @@ impl<B: BackendCaller> CacheProxy<B> {
         metrics: Arc<Metrics>,
         backend: Arc<B>,
         freeze: FreezeController,
+        dirty: Arc<DirtySet>,
+        reval: RevalConfig,
     ) -> Self {
         Self {
             server_alias: server_alias.into(),
@@ -91,6 +123,8 @@ impl<B: BackendCaller> CacheProxy<B> {
             metrics,
             backend,
             freeze,
+            dirty,
+            reval,
         }
     }
 
@@ -148,66 +182,127 @@ impl<B: BackendCaller> CacheProxy<B> {
         }
 
         let key = Cache::key_for(&self.server_alias, &scope, tool, args);
+        let ttl = Duration::from_secs(ttl.unwrap_or(0).max(1));
 
-        // Hit?
-        if let Some(payload) = self.cache.get(&key) {
-            self.metrics.record_hit();
-            debug!(tool = %tool, "cache hit");
-            return Ok(payload);
+        // Чистый HIT: запись жива И ни один её зависимый файл не «грязный» в этом
+        // scope. При выключенной ленивой ревалидации dirty всегда пуст → обычный
+        // hit без накладных расходов (any_dirty имеет быстрый путь на пустом set).
+        if let Some((payload, deps)) = self.cache.get_with_deps(&key) {
+            if !self.reval.enabled || !self.dirty.any_dirty(&scope, &deps) {
+                self.metrics.record_hit();
+                debug!(tool = %tool, "cache hit");
+                return Ok(payload);
+            }
+            debug!(tool = %tool, scope = %scope, "dirty hit → ревалидация");
         }
 
-        // Miss → single-flight в бэкенд.
+        // MISS либо dirty-HIT → идём в бэкенд.
         self.metrics.record_miss();
-        let ttl = Duration::from_secs(ttl.unwrap_or(0).max(1));
-        let cache = self.cache.clone();
-        let metrics = self.metrics.clone();
-        let key_for_cache = key.clone();
 
-        // Клон ссылок специально под closure single-flight'а: эти переменные
-        // уйдут внутрь, а внешние `cache`/`metrics` останутся для пост-обработки.
+        // Ленивая ревалидация выключена → старое поведение: один форвард + insert.
+        if !self.reval.enabled {
+            return self.forward_and_cache(&key, tool, args, ttl).await;
+        }
+
+        // Strong с ограниченным бюджетом: форвардим и сверяем mtime; кэшируем
+        // ТОЛЬКО когда индекс догнал диск (`index_mtime >= observed`). По
+        // исчерпании бюджета — мягкий фолбэк: отдать ответ без запоминания, dirty
+        // оставить (снимется на следующем чтении). `max_wait=0` → eventual.
+        let deadline = Instant::now() + self.reval.max_wait;
+        loop {
+            let payload = self.forward_once(&key, tool, args).await?;
+            let deps = extract_dependent_files(&payload);
+            let mtimes = extract_file_mtimes(&payload);
+
+            // Среди зависимых файлов смотрим только грязные в этом scope: догнал
+            // ли их индекс. Файл без mtime в ответе (нет в file_mtimes) считаем
+            // «не догнал» — консервативно, не кэшируем.
+            let mut all_caught = true;
+            let mut caught: Vec<(String, i64)> = Vec::new();
+            for f in &deps {
+                let Some(observed) = self.dirty.observed(&scope, f) else {
+                    continue;
+                };
+                match mtimes.get(f) {
+                    Some(idx) if *idx >= observed => caught.push((f.clone(), *idx)),
+                    _ => all_caught = false,
+                }
+            }
+
+            if all_caught {
+                if deps.is_empty() {
+                    self.cache.insert(key.clone(), payload.clone(), ttl);
+                } else {
+                    self.cache
+                        .insert_with_deps(key.clone(), payload.clone(), ttl, deps);
+                }
+                for (f, idx) in caught {
+                    self.dirty.clear_if_caught_up(&scope, &f, idx);
+                }
+                self.metrics.update_cache_size(self.cache.len());
+                return Ok(payload);
+            }
+
+            if Instant::now() >= deadline {
+                debug!(
+                    tool = %tool, scope = %scope,
+                    "ревалидация: индекс не догнал в бюджет → отдаю без кэша"
+                );
+                return Ok(payload);
+            }
+            tokio::time::sleep(self.reval.retry_interval).await;
+        }
+    }
+
+    /// Один форвард на бэкенд через single-flight (без записи в кэш). Возвращает
+    /// `Arc<String>` payload или ошибку бэкенда.
+    async fn forward_once(
+        &self,
+        key: &str,
+        tool: &str,
+        args: &Value,
+    ) -> Result<Arc<String>, ProxyError> {
         let work = {
             let backend = self.backend.clone();
-            let metrics_inner = metrics.clone();
+            let metrics = self.metrics.clone();
             let tool_owned = tool.to_string();
             let args_owned = args.clone();
             move || async move {
                 let started = Instant::now();
                 let payload = backend.call(&tool_owned, &args_owned).await?;
-                metrics_inner
-                    .observe_backend_latency_micros(started.elapsed().as_micros() as u64);
+                metrics.observe_backend_latency_micros(started.elapsed().as_micros() as u64);
                 Ok::<String, String>(payload)
             }
         };
-
-        let result = self.singleflight.do_or_join(key, work).await;
-
-        match result {
-            Ok(shared_payload) => {
-                // shared_payload: Arc<String> уже из SingleFlight.
-                // Парсим payload: если бэкенд вернул `_meta.dependent_files`,
-                // регистрируем эти связи в reverse_index через insert_with_deps.
-                // Иначе — обычный insert без зависимостей (обратная совместимость
-                // со старыми бэкендами или tool-вызовами без metadata).
-                let deps = extract_dependent_files(&shared_payload);
-                if deps.is_empty() {
-                    cache.insert(key_for_cache, shared_payload.clone(), ttl);
-                } else {
-                    cache.insert_with_deps(
-                        key_for_cache,
-                        shared_payload.clone(),
-                        ttl,
-                        deps,
-                    );
-                }
-                metrics.update_cache_size(cache.len());
-                Ok(shared_payload)
-            }
+        match self.singleflight.do_or_join(key.to_string(), work).await {
+            Ok(shared) => Ok(shared),
             Err(err) => {
-                metrics.record_backend_error();
+                self.metrics.record_backend_error();
                 warn!(tool = %tool, error = %err, "backend call failed");
                 Err(ProxyError::Backend(err))
             }
         }
+    }
+
+    /// Форвард + безусловная запись в кэш (с reverse_index по dependent_files).
+    /// Путь при выключенной ленивой ревалидации — поведение до #1471.
+    async fn forward_and_cache(
+        &self,
+        key: &str,
+        tool: &str,
+        args: &Value,
+        ttl: Duration,
+    ) -> ProxyResult {
+        let payload = self.forward_once(key, tool, args).await?;
+        let deps = extract_dependent_files(&payload);
+        if deps.is_empty() {
+            self.cache.insert(key.to_string(), payload.clone(), ttl);
+        } else {
+            self.cache
+                .insert_with_deps(key.to_string(), payload.clone(), ttl, deps);
+        }
+        self.metrics.update_cache_size(self.cache.len());
+        Ok(payload)
     }
 
     async fn forward_no_cache(&self, tool: &str, args: &Value) -> ProxyResult {
@@ -291,6 +386,46 @@ fn extract_dependent_files(payload: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// Извлечь `_meta.file_mtimes` (карта `rel_path → индексный mtime`, unix-секунды)
+/// из ответа serve. Зеркало [`extract_dependent_files`]: пробует top-level, затем
+/// MCP-обёртку `content[0].text`. Отсутствие/невалидность → пустая карта. Вход
+/// для write-triggered ленивой ревалидации (#1471).
+fn extract_file_mtimes(payload: &str) -> std::collections::HashMap<String, i64> {
+    use std::collections::HashMap;
+    fn from_meta(v: &Value) -> Option<HashMap<String, i64>> {
+        let obj = v.get("_meta")?.get("file_mtimes")?.as_object()?;
+        Some(
+            obj.iter()
+                .filter_map(|(k, val)| val.as_i64().map(|m| (k.clone(), m)))
+                .collect(),
+        )
+    }
+    let parsed: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    if let Some(m) = from_meta(&parsed) {
+        return m;
+    }
+    let nested_text = parsed
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|item| item.get("type").and_then(|t| t.as_str()) == Some("text"))
+        })
+        .and_then(|item| item.get("text"))
+        .and_then(|t| t.as_str());
+    if let Some(text) = nested_text {
+        if let Ok(inner) = serde_json::from_str::<Value>(text) {
+            if let Some(m) = from_meta(&inner) {
+                return m;
+            }
+        }
+    }
+    HashMap::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,8 +459,144 @@ mod tests {
             Arc::new(Metrics::new()),
             backend.clone(),
             crate::freeze::FreezeController::new(),
+            Arc::new(DirtySet::new()),
+            RevalConfig::default(),
         );
         (proxy, backend)
+    }
+
+    /// Backend, отдающий ответы по индексу вызова (последний повторяется) —
+    /// моделирует «индекс ещё не догнал → догнал» между ретраями ревалидации.
+    struct SeqBackend {
+        calls: AtomicUsize,
+        responses: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl BackendCaller for SeqBackend {
+        async fn call(&self, _tool: &str, _args: &Value) -> Result<String, String> {
+            let i = self.calls.fetch_add(1, Ordering::SeqCst);
+            let idx = i.min(self.responses.len() - 1);
+            Ok(self.responses[idx].clone())
+        }
+    }
+
+    fn build_proxy_reval(
+        responses: Vec<&str>,
+        max_wait_ms: u64,
+    ) -> (CacheProxy<SeqBackend>, Arc<SeqBackend>, Arc<DirtySet>) {
+        let backend = Arc::new(SeqBackend {
+            calls: AtomicUsize::new(0),
+            responses: responses.into_iter().map(String::from).collect(),
+        });
+        let dirty = Arc::new(DirtySet::new());
+        let reval = RevalConfig {
+            enabled: true,
+            max_wait: Duration::from_millis(max_wait_ms),
+            retry_interval: Duration::from_millis(5),
+        };
+        let proxy = CacheProxy::new(
+            "ci",
+            Some("repo"),
+            Arc::new(arc_swap::ArcSwap::from_pointee(Policy::default())),
+            Arc::new(Cache::new()),
+            Arc::new(SingleFlight::new()),
+            Arc::new(Metrics::new()),
+            backend.clone(),
+            crate::freeze::FreezeController::new(),
+            dirty.clone(),
+            reval,
+        );
+        (proxy, backend, dirty)
+    }
+
+    const R_BEHIND: &str = r#"{"result":[],"_meta":{"dependent_files":["src/X.bsl"],"file_mtimes":{"src/X.bsl":90}}}"#;
+    const R_CAUGHT: &str = r#"{"result":[],"_meta":{"dependent_files":["src/X.bsl"],"file_mtimes":{"src/X.bsl":100}}}"#;
+
+    #[tokio::test]
+    async fn revalidation_caches_only_when_index_caught_up() {
+        // Раунд 1 — индекс отстаёт (90<100), раунд 2 — догнал (100>=100).
+        let (proxy, backend, dirty) = build_proxy_reval(vec![R_BEHIND, R_CAUGHT], 1000);
+        dirty.mark("ut", "src/X.bsl", 100);
+        let args = json!({"repo": "ut", "query": "F"});
+
+        let _ = proxy.handle("search_function", &args, false).await.unwrap();
+        // Два форварда: первый отстал, второй догнал и закэшировался.
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(proxy.cache.len(), 1, "ответ закэширован после догона");
+        assert_eq!(
+            dirty.observed("ut", "src/X.bsl"),
+            None,
+            "флаг снят после догона"
+        );
+
+        // Повтор — чистый HIT, в backend не ходим.
+        let _ = proxy.handle("search_function", &args, false).await.unwrap();
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 2);
+        let snap = proxy.metrics.snapshot();
+        assert_eq!(snap.cache_hits, 1);
+    }
+
+    #[tokio::test]
+    async fn eventual_serves_stale_without_caching_when_behind() {
+        // max_wait=0 → eventual: один форвард, индекс отстаёт → отдать без кэша.
+        let (proxy, backend, dirty) = build_proxy_reval(vec![R_BEHIND], 0);
+        dirty.mark("ut", "src/X.bsl", 100);
+        let args = json!({"repo": "ut", "query": "F"});
+
+        let _ = proxy.handle("search_function", &args, false).await.unwrap();
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "ровно один форвард");
+        assert_eq!(proxy.cache.len(), 0, "старьё в кэш не попало");
+        assert_eq!(
+            dirty.observed("ut", "src/X.bsl"),
+            Some(100),
+            "флаг остаётся грязным"
+        );
+    }
+
+    #[tokio::test]
+    async fn dirty_hit_triggers_revalidation_not_stale_serve() {
+        // Backend всегда отдаёт догнавший ответ. Сначала кладём в кэш (чисто),
+        // потом метим грязным → следующий HIT должен пойти на ревалидацию.
+        let (proxy, backend, dirty) = build_proxy_reval(vec![R_CAUGHT], 1000);
+        let args = json!({"repo": "ut", "query": "F"});
+
+        // Чистый MISS → закэшировали (грязных файлов нет → all_caught=true).
+        let _ = proxy.handle("search_function", &args, false).await.unwrap();
+        assert_eq!(backend.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(proxy.cache.len(), 1);
+
+        // Метим грязным с observed, который индекс уже перекрывает (100>=100).
+        dirty.mark("ut", "src/X.bsl", 100);
+        // dirty-HIT → форвард (а не отдача из кэша), индекс догнал → re-cache+clear.
+        let _ = proxy.handle("search_function", &args, false).await.unwrap();
+        assert_eq!(
+            backend.calls.load(Ordering::SeqCst),
+            2,
+            "dirty-hit обязан сходить в backend"
+        );
+        assert_eq!(dirty.observed("ut", "src/X.bsl"), None, "флаг снят");
+    }
+
+    #[test]
+    fn extract_file_mtimes_top_level() {
+        let m = super::extract_file_mtimes(R_CAUGHT);
+        assert_eq!(m.get("src/X.bsl"), Some(&100));
+    }
+
+    #[test]
+    fn extract_file_mtimes_mcp_wrapper() {
+        let inner = R_CAUGHT;
+        let inner_escaped = serde_json::to_string(inner).unwrap();
+        let payload = format!(r#"{{"content":[{{"type":"text","text":{}}}]}}"#, inner_escaped);
+        let m = super::extract_file_mtimes(&payload);
+        assert_eq!(m.get("src/X.bsl"), Some(&100));
+    }
+
+    #[test]
+    fn extract_file_mtimes_absent_is_empty() {
+        assert!(super::extract_file_mtimes(r#"{"result":[]}"#).is_empty());
+        assert!(super::extract_file_mtimes("not json").is_empty());
     }
 
     #[tokio::test]

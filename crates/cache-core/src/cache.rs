@@ -119,6 +119,22 @@ impl Cache {
         None
     }
 
+    /// Как [`get`], но дополнительно возвращает `dependent_files` живой записи —
+    /// нужно для проверки dirty-флагов в proxy (write-triggered ленивая
+    /// ревалидация, #1471): по списку зависимых файлов решаем, не «грязный» ли
+    /// какой-то из них, прежде чем отдать запись как HIT.
+    ///
+    /// [`get`]: Cache::get
+    pub fn get_with_deps(&self, key: &str) -> Option<(Arc<String>, Vec<String>)> {
+        if let Some(entry) = self.inner.get(key) {
+            if !entry.is_expired() {
+                return Some((entry.payload.clone(), entry.dependent_files.clone()));
+            }
+        }
+        self.inner.remove_if(key, |_, v| v.is_expired());
+        None
+    }
+
     pub fn insert(&self, key: String, payload: Arc<String>, ttl: Duration) {
         self.inner.insert(key, CacheEntry::new(payload, ttl));
     }

@@ -14,6 +14,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod dirty;
 pub mod freeze;
 pub mod metrics;
 pub mod policy;
@@ -25,10 +26,11 @@ pub mod singleflight;
 
 pub use cache::{Cache, CacheEntry};
 pub use config::{BackendConfig, CacheConfig, HealthConfig, ProxyConfig, ServerConfig};
+pub use dirty::DirtySet;
 pub use freeze::{FreezeController, FreezeEntry, FreezeState};
 pub use metrics::{Metrics, MetricsSnapshot};
 pub use policy::{Policy, ScopePolicy, ToolPolicy};
-pub use proxy::{BackendCaller, CacheProxy, ProxyError, ProxyResult};
+pub use proxy::{BackendCaller, CacheProxy, ProxyError, ProxyResult, RevalConfig};
 pub use reverse_index::ReverseIndex;
 pub use rmcp_client::{RmcpBackend, SharedBackend};
 pub use server::ProxyServer;
