@@ -73,7 +73,8 @@ Full configuration with all options — see `config/cache-ci.example.toml` and `
 - `GET /health` — proxy status + version + `cache_size`.
 - `GET /metrics` — Prometheus text exposition format (`text/plain; version=0.0.4`).
 - `GET /metrics/json` — JSON snapshot (`MetricsSnapshot`).
-- `GET /status` — extended info (metrics + `frozen_scopes`).
+- `GET /status` — extended info (metrics + `frozen_scopes` + `dirty_size`).
+- `POST /mark-dirty` — early "paths are dirty" signal from the code-index daemon for **write-triggered lazy revalidation** (see below). Body: `{repo, files:[{path, mtime}]}`, sent on FS events *before* reparse/commit, in addition to `/invalidate` after commit. Requires code-index ≥ 0.20.0.
 - `POST /invalidate` — selective invalidation:
   - `all: bool` — drop the entire cache.
   - `repo: String` — drop by scope-prefix.
@@ -94,12 +95,30 @@ cacheable = false  # all requests with repo=ut go directly to the backend, nothi
 
 Primary use case — federated repos under concurrent edits (when event-driven invalidation is unavailable but stale cache is also unacceptable). Default is `cacheable = true`.
 
+## Write-triggered lazy revalidation
+
+Since **0.4.0**, on top of `POST /invalidate` (sent *after* the daemon commits a reindex, ~1.5 s after the write), the proxy accepts an early `POST /mark-dirty` (sent *before* reparse) and revalidates lazily by comparing mtimes — so it serves fresh data as soon as the index catches up, without waiting for TTL and without depending on `/invalidate` delivery.
+
+How it works:
+
+1. The daemon's watcher catches an FS event and immediately sends `POST /mark-dirty {repo, files:[{path, mtime}]}` with the observed disk mtime. The proxy marks `(repo, path)` dirty (keeping the max observed mtime).
+2. On a read whose cached entry depends on a dirty file, the proxy forwards to the backend instead of serving the cached value, and compares the observed mtime against the index mtime from `_meta.file_mtimes` in the serve response.
+3. It caches the response and clears the flag **only** when `index_mtime >= observed` (the index reflects disk). Otherwise it serves the response without caching and keeps the flag.
+
+**Strong mode with a budget:** while the index is behind, the proxy retries the forward for up to `revalidation_max_wait_ms` (default 2000), returning as soon as the index catches up; on budget exhaustion it falls back to serving without caching. `revalidation_max_wait_ms = 0` → eventual (single forward, no retries).
+
+**Federation-safe:** the "current" mtime is supplied by the daemon (co-located with the files), so the proxy never touches the filesystem — this works for federated repos whose files the proxy cannot see.
+
+Config keys under `[cache]`: `lazy_revalidation_enabled` (default `true`), `revalidation_max_wait_ms` (`2000`), `revalidation_retry_interval_ms` (`150`), `dirty_ttl_seconds` (`300`, safety pruning of stuck dirty flags). Set `lazy_revalidation_enabled = false` for 0.3.x behaviour.
+
 ## Compatibility
 
 | code-index | Behaviour |
 |---|---|
 | `≥ 0.9.0` | Full event-based invalidation. Backend returns `_meta.dependent_files`, cache-ci registers `cache_key → file_paths` in `reverse_index`. After re-indexing a file the daemon sends `POST /invalidate {file_paths}` — targeted eviction. |
 | `< 0.9.0` | TTL fallback only. `_meta.dependent_files` is missing → `reverse_index` stays empty → targeted invalidation is inactive, cache lives by TTL. |
+
+For **write-triggered lazy revalidation** (0.4.0) the backend must additionally emit `_meta.file_mtimes` and the daemon must send `POST /mark-dirty` — both available in **code-index ≥ 0.20.0**. With an older code-index lazy revalidation stays inactive and the proxy falls back to invalidate + TTL.
 
 ## MCP transport: stateless mode
 

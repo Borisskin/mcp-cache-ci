@@ -73,7 +73,8 @@ timeout_ms = 5000
 - `GET /health` — статус прокси + версия + cache_size.
 - `GET /metrics` — Prometheus text exposition format (`text/plain; version=0.0.4`).
 - `GET /metrics/json` — JSON snapshot (`MetricsSnapshot`).
-- `GET /status` — расширенная информация (метрики + frozen_scopes).
+- `GET /status` — расширенная информация (метрики + frozen_scopes + dirty_size).
+- `POST /mark-dirty` — ранний сигнал «пути грязные» от daemon code-index для **write-triggered ленивой ревалидации** (см. ниже). Тело: `{repo, files:[{path, mtime}]}`, шлётся на FS-событие *до* переразбора/commit, в дополнение к `/invalidate` после commit. Требует code-index ≥ 0.20.0.
 - `POST /invalidate` — селективная инвалидация:
   - `all: bool` — снести весь кэш.
   - `repo: String` — снести по scope-prefix.
@@ -94,12 +95,30 @@ cacheable = false  # все запросы по repo=ut идут direct чере
 
 Целевой use case — federated репо при групповой работе (когда инвалидация по событиям невозможна, но и stale-кэш недопустим). Default — `cacheable=true`.
 
+## Write-triggered ленивая ревалидация
+
+Начиная с **0.4.0**, поверх `POST /invalidate` (шлётся *после* commit переразбора, ~1.5 с после записи) прокси принимает ранний `POST /mark-dirty` (шлётся *до* переразбора) и ревалидирует лениво, сверяя mtime — отдаёт свежие данные сразу как индекс догнал диск, не дожидаясь TTL и не завися от доставки `/invalidate`.
+
+Как работает:
+
+1. Watcher демона ловит FS-событие и сразу шлёт `POST /mark-dirty {repo, files:[{path, mtime}]}` с наблюдённым mtime файла. Прокси помечает `(repo, path)` грязным (держит максимум observed mtime).
+2. На чтении, чья запись зависит от грязного файла, прокси форвардит на backend (а не отдаёт из кэша) и сравнивает observed-mtime с индексным mtime из `_meta.file_mtimes` ответа serve.
+3. Кэширует ответ и снимает флаг **только** когда `index_mtime >= observed` (индекс отразил диск). Иначе отдаёт ответ без запоминания и оставляет флаг.
+
+**Strong-режим с бюджетом:** пока индекс отстаёт, прокси ретраит форвард до `revalidation_max_wait_ms` (default 2000), возвращая управление сразу как индекс догнал; по исчерпании бюджета — фолбэк на отдачу без кэширования. `revalidation_max_wait_ms = 0` → eventual (один форвард без ретраев).
+
+**Федерация-safe:** «текущий» mtime приносит демон (co-located с файлами), поэтому прокси не обращается к файловой системе — работает и для федеративных репо, чьи файлы прокси не видит.
+
+Ключи конфига в `[cache]`: `lazy_revalidation_enabled` (default `true`), `revalidation_max_wait_ms` (`2000`), `revalidation_retry_interval_ms` (`150`), `dirty_ttl_seconds` (`300`, страховочная чистка зависших dirty-флагов). `lazy_revalidation_enabled = false` → поведение 0.3.x.
+
 ## Совместимость
 
 | code-index | Поведение |
 |---|---|
 | `≥ 0.9.0` | Полная event-based инвалидация. Бэкенд возвращает `_meta.dependent_files`, cache-ci регистрирует `cache_key → file_paths` в reverse_index. После переиндексации файла daemon шлёт `POST /invalidate {file_paths}` — точечный снос. |
 | `< 0.9.0` | Только TTL fallback. `_meta.dependent_files` отсутствует → reverse_index пустой → точечная инвалидация не активна, кэш живёт по TTL. |
+
+Для **write-triggered ленивой ревалидации** (0.4.0) бэкенд должен дополнительно отдавать `_meta.file_mtimes`, а daemon — слать `POST /mark-dirty`; и то и другое доступно в **code-index ≥ 0.20.0**. Со старым code-index ленивая ревалидация не активна, прокси откатывается на invalidate + TTL.
 
 ## MCP transport: stateless mode
 
