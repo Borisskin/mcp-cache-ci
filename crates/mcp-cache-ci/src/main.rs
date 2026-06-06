@@ -29,8 +29,8 @@ use rmcp::transport::streamable_http_server::{
 use tracing::{info, warn};
 
 use cache_core::{
-    Cache, CacheProxy, FreezeController, Metrics, Policy, ProxyConfig, ProxyServer, RmcpBackend,
-    SingleFlight,
+    Cache, CacheProxy, DirtySet, FreezeController, Metrics, Policy, ProxyConfig, ProxyServer,
+    RevalConfig, RmcpBackend, SingleFlight,
 };
 
 const SERVER_ALIAS: &str = "ci";
@@ -85,6 +85,19 @@ async fn main() -> Result<()> {
     let singleflight = Arc::new(SingleFlight::<String>::new());
     let policy_swap = Arc::new(arc_swap::ArcSwap::from_pointee(policy));
     let freeze = FreezeController::new();
+    let dirty = Arc::new(DirtySet::new());
+    let reval = RevalConfig {
+        enabled: cfg.cache.lazy_revalidation_enabled,
+        max_wait: Duration::from_millis(cfg.cache.revalidation_max_wait_ms),
+        retry_interval: Duration::from_millis(cfg.cache.revalidation_retry_interval_ms.max(1)),
+    };
+    info!(
+        enabled = reval.enabled,
+        max_wait_ms = cfg.cache.revalidation_max_wait_ms,
+        retry_ms = cfg.cache.revalidation_retry_interval_ms,
+        dirty_ttl_s = cfg.cache.dirty_ttl_seconds,
+        "ленивая ревалидация (#1471)"
+    );
 
     let proxy = Arc::new(CacheProxy::new(
         SERVER_ALIAS,
@@ -95,9 +108,17 @@ async fn main() -> Result<()> {
         metrics.clone(),
         backend.clone(),
         freeze.clone(),
+        dirty.clone(),
+        reval,
     ));
 
-    spawn_eviction_task(cache.clone(), metrics.clone(), cfg.cache.evict_interval_seconds);
+    spawn_eviction_task(
+        cache.clone(),
+        metrics.clone(),
+        dirty.clone(),
+        Duration::from_secs(cfg.cache.dirty_ttl_seconds),
+        cfg.cache.evict_interval_seconds,
+    );
 
     // 4) Создаём rmcp ServerHandler и оборачиваем его в StreamableHttpService.
     let proxy_server = ProxyServer::new(
@@ -134,6 +155,7 @@ async fn main() -> Result<()> {
         backend_url: cfg.backend.url.clone(),
         server_alias: SERVER_ALIAS.to_string(),
         freeze: freeze.clone(),
+        dirty: dirty.clone(),
     };
 
     // Fallback-прокси: всё, что не /health, /metrics, /invalidate, /mcp/* —
@@ -156,6 +178,7 @@ async fn main() -> Result<()> {
         .route("/metrics/json", get(handlers::metrics_json))
         .route("/status", get(handlers::status))
         .route("/invalidate", post(handlers::invalidate))
+        .route("/mark-dirty", post(handlers::mark_dirty))
         .route("/freeze", post(handlers::freeze))
         .route("/thaw", post(handlers::thaw))
         .with_state(state)
@@ -182,7 +205,13 @@ fn init_tracing() {
         .init();
 }
 
-fn spawn_eviction_task(cache: Arc<Cache>, metrics: Arc<Metrics>, interval_s: u64) {
+fn spawn_eviction_task(
+    cache: Arc<Cache>,
+    metrics: Arc<Metrics>,
+    dirty: Arc<DirtySet>,
+    dirty_ttl: Duration,
+    interval_s: u64,
+) {
     if interval_s == 0 {
         return;
     }
@@ -192,8 +221,12 @@ fn spawn_eviction_task(cache: Arc<Cache>, metrics: Arc<Metrics>, interval_s: u64
             tick.tick().await;
             let removed = cache.evict_expired();
             metrics.update_cache_size(cache.len());
-            if removed > 0 {
-                tracing::debug!(removed, "background eviction");
+            // Страховочная чистка протухших dirty-флагов (#1471): в норме флаг
+            // снимается сверкой mtime на первом чтении, но если по пути чтения
+            // так и не пришло — TTL не даёт множеству расти бесконечно.
+            let dirty_pruned = dirty.prune_older_than(dirty_ttl);
+            if removed > 0 || dirty_pruned > 0 {
+                tracing::debug!(removed, dirty_pruned, "background eviction");
             }
         }
     });

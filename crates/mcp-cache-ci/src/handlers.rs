@@ -11,7 +11,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use cache_core::{Cache, FreezeController, Metrics};
+use cache_core::{Cache, DirtySet, FreezeController, Metrics};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +23,9 @@ pub struct AppState {
     pub server_alias: String,
     /// Контроллер заморозки — общий с CacheProxy.
     pub freeze: FreezeController,
+    /// Множество грязных путей — общее с CacheProxy (write-triggered ленивая
+    /// ревалидация, #1471). Наполняется `POST /mark-dirty`.
+    pub dirty: Arc<DirtySet>,
 }
 
 pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
@@ -127,6 +130,45 @@ pub async fn invalidate(
     .into_response()
 }
 
+/// Один файл в payload `POST /mark-dirty`.
+#[derive(Debug, Deserialize)]
+pub struct MarkDirtyFile {
+    pub path: String,
+    /// observed mtime (unix-секунды), наблюдённый демоном на FS-событии.
+    pub mtime: i64,
+}
+
+/// Ранний сигнал «пути грязные» от демона `code-index` — write-triggered ленивая
+/// ревалидация (#1471). Шлётся ДО commit переразбора, в дополнение к
+/// `POST /invalidate` после commit. Помечает `(repo, path)` грязными с observed
+/// mtime; дальше прокси на чтении сверит его с индексным mtime из ответа serve.
+#[derive(Debug, Deserialize)]
+pub struct MarkDirtyRequest {
+    /// scope (для cache-ci — алиас репо, `effective_alias()` пути в демоне).
+    #[serde(default)]
+    pub repo: Option<String>,
+    /// Алиас имени `repo` — совместимость с внешними клиентами.
+    #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub files: Vec<MarkDirtyFile>,
+}
+
+pub async fn mark_dirty(
+    State(state): State<AppState>,
+    Json(req): Json<MarkDirtyRequest>,
+) -> impl IntoResponse {
+    let scope = req.repo.or(req.base).unwrap_or_default();
+    for f in &req.files {
+        state.dirty.mark(&scope, &f.path, f.mtime);
+    }
+    Json(json!({
+        "marked": req.files.len(),
+        "scope": scope,
+        "dirty_size": state.dirty.len(),
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct FreezeRequest {
     /// Имя scope (для cache-ci — алиас репо). Если опущено или `""` —
@@ -201,6 +243,7 @@ pub async fn status(State(state): State<AppState>) -> impl IntoResponse {
         "cache_size": snap.cache_size,
         "metrics": snap,
         "frozen_scopes": state.freeze.list_active(),
+        "dirty_size": state.dirty.len(),
     }))
 }
 
