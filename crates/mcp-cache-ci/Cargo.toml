@@ -22,6 +22,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
+sysinfo = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

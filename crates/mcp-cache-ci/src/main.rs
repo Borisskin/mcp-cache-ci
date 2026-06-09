@@ -37,6 +37,7 @@ const SERVER_ALIAS: &str = "ci";
 const SCOPE_ARG_NAME: &str = "repo";
 
 mod handlers;
+mod pidlock;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Кэш-прокси перед code-index serve")]
@@ -48,6 +49,11 @@ struct Cli {
     /// Перебить bind_port из конфига.
     #[arg(long, env = "MCP_CACHE_BIND_PORT")]
     bind_port: Option<u16>,
+
+    /// Путь к PID-файлу для singleton-защиты. Если не задан — lock не берётся
+    /// (Docker: singleton гарантирует контейнер). Задавать на Windows под supervisor.
+    #[arg(long, env = "MCP_CACHE_PID_FILE")]
+    pid_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -56,6 +62,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     info!(config = %cli.config.display(), "запуск mcp-cache-ci");
+
+    // Опциональный singleton PID-lock: активен только при заданном --pid-file
+    // (Windows под supervisor). В Docker не задаётся — singleton даёт контейнер.
+    let _pidlock = pidlock::PidLock::acquire_optional(cli.pid_file.clone(), "mcp-cache-ci")
+        .context("захват PID-lock")?;
 
     let mut cfg = ProxyConfig::from_file(&cli.config)
         .with_context(|| "не удалось загрузить конфиг")?;

@@ -4,6 +4,26 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/), версионирование по [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.1] — 2026-06-09
+
+### Добавлено
+
+- **Opt-in singleton PID-lock** через CLI `--pid-file` / env `MCP_CACHE_PID_FILE`
+  (sysinfo 0.32; эталон — code-index `daemon_core/lock.rs`). При заданном пути: если
+  процесс с записанным PID жив — отказ старта; устаревший PID-файл перезаписывается;
+  RAII Drop удаляет файл при graceful shutdown. Если путь не задан — lock не берётся
+  (для Docker, где singleton гарантирует контейнер: `container_name` + `restart` + bind порта).
+- Развёрнуто синхронно на 3 инстансах: локальный `mcp-cache-ci` под mcp-supervisor
+  (lock **активен** — `MCP_CACHE_PID_FILE` задан в `services.json`, PID-файл создаётся),
+  на ВМ rag `mcp-cache-ci` и `mcp-cache-rag` (lock dormant — env не задан).
+
+### Совместимость
+
+- **Аддитивно, не breaking.** Без `--pid-file`/`MCP_CACHE_PID_FILE` поведение 0.4.0 без изменений.
+- Workspace version 0.4.0 → **0.4.1** (patch — аддитивная фича). Образы на ВМ
+  (`mcp-cache-ci:0.4.0`, `mcp-cache-rag:0.3.0`) пересобраны с этим бинарником, но
+  тег образа и `/health` сообщают прежнюю версию до следующей пересборки.
+
 ## [0.4.0] — 2026-06-06
 
 ### Добавлено

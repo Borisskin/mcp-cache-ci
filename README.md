@@ -68,6 +68,12 @@ timeout_ms = 5000
 
 Full configuration with all options — see `config/cache-ci.example.toml` and `config/cache_policy_ci.example.toml`.
 
+## Singleton lock (optional)
+
+Pass `--pid-file <path>` (or env `MCP_CACHE_PID_FILE`) to enable a single-instance guard. On start the proxy writes its PID to the file; if a process with the recorded PID is already alive it refuses to start, a stale file is overwritten, and the file is removed on graceful shutdown (liveness checked via `sysinfo`). When the flag is omitted, no lock is taken.
+
+Use it on Windows under a supervisor / scheduler, where a race or PID reuse could otherwise start a second instance. In Docker leave it unset — the container already guarantees a single instance (`container_name` + `restart` + port bind), and a stale lock would only get in the way of a restart.
+
 ## Endpoints
 
 - `GET /health` — proxy status + version + `cache_size`.

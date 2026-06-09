@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT"
 description = "Caching MCP proxy in front of code-index with event-based invalidation"
@@ -55,6 +55,9 @@ futures-util = "0.3"
 sha2 = "0.10"
 hex = "0.4"
 async-trait = "0.1"
+# Singleton PID-lock (опционально, только при заданном --pid-file/MCP_CACHE_PID_FILE
+# — Windows под supervisor). В Docker не задаётся: singleton даёт сам контейнер.
+sysinfo = "0.32"
 
 # Логи
 tracing = "0.1"
