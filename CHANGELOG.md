@@ -4,6 +4,23 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.0.0/), версионирование по [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.2] — 2026-06-09
+
+**Служебное поле `_meta` больше не доезжает до клиента — ни через `content`, ни через `structuredContent`.**
+
+### Исправлено
+
+- **`_meta` снимается из ответов клиенту во всех путях.** `_meta` (`dependent_files` / `file_mtimes`) — служебный канал serve↔cache-ci: deps идут в `reverse_index`, mtimes — во write-triggered ревалидацию (#1471). Модели это поле не нужно и раздувает контекст. `strip_meta` снимает его в `forward_and_cache`, reval-loop и `forward_no_cache` перед кэшированием и отдачей; deps/mtimes извлекаются из сырого payload ДО strip — инвалидация не страдает.
+- **Очистка `structuredContent._meta` (закрывает дыру для extension-tools).** BSL-extension инструменты code-index serve (`get_object_structure`/`get_object_profile`, `bsl_sql`, `get_data_links` и др.) отдают rmcp `structuredContent = {_meta, result}` ПОМИМО `content[*].text`. Прежняя ветка чистила только `content[*].text`, и `_meta` доезжал до клиента через `structuredContent`. Добавлена ветка очистки `structuredContent._meta`. Обнаружено на живом ut-test (`get_object_structure` отдавал `_meta`).
+
+### Тесты
+
+- Юнит-тест `strip_meta_removes_meta_from_structured_content` на РЕАЛЬНОЙ форме extension-ответа (content + structuredContent). 72 теста passed. Смок на живом: `get_object_structure`/`get_object_profile` — `_meta` нигде (miss и hit), `structuredContent.result` цел; core-tools (`find_symbol`/`get_callers`) без регрессии.
+
+### Совместимость
+
+- Workspace version 0.4.1 → **0.4.2** (patch — очистка ответов, аддитивно). Локальный `mcp-cache-ci` под mcp-supervisor пересобран и задеплоен. ВМ-инстансы (`mcp-cache-ci`, `mcp-cache-rag` на rag) пересобрать отдельно — там без фикса `_meta` extension-tools доезжает через federation-кэш.
+
 ## [0.4.1] — 2026-06-09
 
 ### Добавлено

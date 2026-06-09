@@ -85,7 +85,7 @@ Use it on Windows under a supervisor / scheduler, where a race or PID reuse coul
   - `all: bool` — drop the entire cache.
   - `repo: String` — drop by scope-prefix.
   - `key_prefix: String` — arbitrary key prefix (handy for debugging).
-  - `file_paths: Vec<String>` or `file_path: String` — **fine-grained invalidation** by file list via `reverse_index` (requires the backend to send `_meta.dependent_files` in responses — supported by code-index ≥ 0.9.0).
+  - `file_paths: Vec<String>` or `file_path: String` — **fine-grained invalidation** by file list via `reverse_index` (requires the backend to send `_meta.dependent_files` in responses — supported by code-index ≥ 0.9.0). This `_meta` is an internal serve↔cache-ci channel and is stripped from responses before they reach the client — including the `structuredContent._meta` of extension tools (since 0.4.2).
 - `POST /freeze` / `POST /thaw` — block mode for a scope or globally for N seconds. Useful when you want to stop caching during a large operation (e.g. `git pull` over a whole repo) — an external sidecar can call `/freeze` before and `/thaw` after.
 
 Bypass header `X-Cache-Bypass: 1` skips the cache for a single request.

@@ -85,7 +85,7 @@ timeout_ms = 5000
   - `all: bool` — снести весь кэш.
   - `repo: String` — снести по scope-prefix.
   - `key_prefix: String` — произвольный prefix для отладки.
-  - `file_paths: Vec<String>` или `file_path: String` — **точечная инвалидация** по списку файлов через `reverse_index` (требует чтобы бэкенд присылал `_meta.dependent_files` в ответах — это умеет code-index ≥ 0.9.0).
+  - `file_paths: Vec<String>` или `file_path: String` — **точечная инвалидация** по списку файлов через `reverse_index` (требует чтобы бэкенд присылал `_meta.dependent_files` в ответах — это умеет code-index ≥ 0.9.0). Это `_meta` — служебный канал serve↔cache-ci, и он снимается из ответов перед отдачей клиенту, включая `structuredContent._meta` extension-инструментов (с 0.4.2).
 - `POST /freeze` / `POST /thaw` — block-режим для scope/global на N секунд. Полезно если хочется остановить кэширование на время крупной операции (например, `git pull` всего репо) — внешний sidecar дёргает `/freeze` до и `/thaw` после.
 
 Bypass-заголовок `X-Cache-Bypass: 1` обходит кэш для конкретного запроса.
