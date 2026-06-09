@@ -213,6 +213,8 @@ impl<B: BackendCaller> CacheProxy<B> {
             let payload = self.forward_once(&key, tool, args).await?;
             let deps = extract_dependent_files(&payload);
             let mtimes = extract_file_mtimes(&payload);
+            // _meta использован для deps/mtimes — снимаем перед кэшем/отдачей.
+            let clean = Arc::new(strip_meta(&payload));
 
             // Среди зависимых файлов смотрим только грязные в этом scope: догнал
             // ли их индекс. Файл без mtime в ответе (нет в file_mtimes) считаем
@@ -231,16 +233,16 @@ impl<B: BackendCaller> CacheProxy<B> {
 
             if all_caught {
                 if deps.is_empty() {
-                    self.cache.insert(key.clone(), payload.clone(), ttl);
+                    self.cache.insert(key.clone(), clean.clone(), ttl);
                 } else {
                     self.cache
-                        .insert_with_deps(key.clone(), payload.clone(), ttl, deps);
+                        .insert_with_deps(key.clone(), clean.clone(), ttl, deps);
                 }
                 for (f, idx) in caught {
                     self.dirty.clear_if_caught_up(&scope, &f, idx);
                 }
                 self.metrics.update_cache_size(self.cache.len());
-                return Ok(payload);
+                return Ok(clean);
             }
 
             if Instant::now() >= deadline {
@@ -248,7 +250,7 @@ impl<B: BackendCaller> CacheProxy<B> {
                     tool = %tool, scope = %scope,
                     "ревалидация: индекс не догнал в бюджет → отдаю без кэша"
                 );
-                return Ok(payload);
+                return Ok(clean);
             }
             tokio::time::sleep(self.reval.retry_interval).await;
         }
@@ -295,14 +297,17 @@ impl<B: BackendCaller> CacheProxy<B> {
     ) -> ProxyResult {
         let payload = self.forward_once(key, tool, args).await?;
         let deps = extract_dependent_files(&payload);
+        // _meta уже использован для deps — снимаем его перед кэшированием и
+        // отдачей клиенту (служебный канал serve↔cache-ci, модели не нужен).
+        let clean = Arc::new(strip_meta(&payload));
         if deps.is_empty() {
-            self.cache.insert(key.to_string(), payload.clone(), ttl);
+            self.cache.insert(key.to_string(), clean.clone(), ttl);
         } else {
             self.cache
-                .insert_with_deps(key.to_string(), payload.clone(), ttl, deps);
+                .insert_with_deps(key.to_string(), clean.clone(), ttl, deps);
         }
         self.metrics.update_cache_size(self.cache.len());
-        Ok(payload)
+        Ok(clean)
     }
 
     async fn forward_no_cache(&self, tool: &str, args: &Value) -> ProxyResult {
@@ -311,13 +316,77 @@ impl<B: BackendCaller> CacheProxy<B> {
             Ok(payload) => {
                 self.metrics
                     .observe_backend_latency_micros(started.elapsed().as_micros() as u64);
-                Ok(Arc::new(payload))
+                Ok(Arc::new(strip_meta(&payload)))
             }
             Err(err) => {
                 self.metrics.record_backend_error();
                 Err(ProxyError::Backend(err))
             }
         }
+    }
+}
+
+/// Снять служебное поле `_meta` из payload перед отдачей клиенту. `_meta`
+/// (dependent_files / file_mtimes) — служебный канал serve↔cache-ci: deps идут
+/// в reverse_index, mtimes — во write-triggered ревалидацию (#1471). Клиенту
+/// (модели) это поле не нужно и только раздувает контекст (на list_files путь
+/// каждого файла дублировался ×3). deps/mtimes к моменту вызова уже извлечены.
+/// Зеркало [`extract_dependent_files`]: MCP CallToolResult (`content[*].text`
+/// со вложенным JSON) или top-level. При любой неожиданности payload не меняется.
+fn strip_meta(payload: &str) -> String {
+    let mut v: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return payload.to_string(),
+    };
+    let mut changed = false;
+    let is_mcp = v.get("content").map(|c| c.is_array()).unwrap_or(false);
+    if is_mcp {
+        // MCP CallToolResult: наш _meta лежит во вложенном JSON content[*].text.
+        // Top-level `_meta` (поле протокола rmcp) не трогаем.
+        if let Some(content) = v.get_mut("content").and_then(|c| c.as_array_mut()) {
+            for item in content.iter_mut() {
+                let text = match item.get("text").and_then(|t| t.as_str()) {
+                    Some(t) => t.to_string(),
+                    None => continue,
+                };
+                let mut inner: Value = match serde_json::from_str(&text) {
+                    Ok(iv) => iv,
+                    Err(_) => continue,
+                };
+                let removed = inner
+                    .as_object_mut()
+                    .map(|o| o.remove("_meta").is_some())
+                    .unwrap_or(false);
+                if removed {
+                    if let Ok(reser) = serde_json::to_string(&inner) {
+                        item["text"] = Value::String(reser);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    } else if let Some(obj) = v.as_object_mut() {
+        // Top-level форма (non-MCP бэкенд): `_meta` рядом с `result`.
+        if obj.remove("_meta").is_some() {
+            changed = true;
+        }
+    }
+    // structuredContent (rmcp CallToolResult, structured output): extension-tools
+    // serve отдают `{_meta, result}` ещё и здесь, дублируя content[*].text.
+    // Без этой ветки `_meta` доезжал до клиента через structuredContent
+    // (WS-3, найдено на живом ut-test 2026-06-09: get_object_structure).
+    if let Some(sc) = v
+        .get_mut("structuredContent")
+        .and_then(|s| s.as_object_mut())
+    {
+        if sc.remove("_meta").is_some() {
+            changed = true;
+        }
+    }
+    if changed {
+        serde_json::to_string(&v).unwrap_or_else(|_| payload.to_string())
+    } else {
+        payload.to_string()
     }
 }
 
@@ -832,5 +901,66 @@ mod tests {
             inner_escaped
         );
         assert!(super::extract_dependent_files(&payload).is_empty());
+    }
+
+    #[test]
+    fn strip_meta_removes_meta_from_mcp_wrapper() {
+        let inner = r#"{"result":[1,2],"_meta":{"dependent_files":["a.bsl"],"file_mtimes":{"a.bsl":5}}}"#;
+        let inner_escaped = serde_json::to_string(inner).unwrap();
+        let payload = format!(r#"{{"content":[{{"type":"text","text":{}}}]}}"#, inner_escaped);
+        // deps извлекаются ДО strip — инвалидация не страдает.
+        assert_eq!(super::extract_dependent_files(&payload), vec!["a.bsl".to_string()]);
+        let clean = super::strip_meta(&payload);
+        assert!(!clean.contains("_meta"), "clean содержит _meta: {}", clean);
+        assert!(!clean.contains("file_mtimes"));
+        assert!(!clean.contains("dependent_files"));
+        // полезная нагрузка result сохранена внутри content[0].text.
+        assert!(clean.contains("result"), "result потерян: {}", clean);
+    }
+
+    #[test]
+    fn strip_meta_removes_top_level_meta() {
+        let payload = r#"{"result":[],"_meta":{"dependent_files":["x"]}}"#;
+        let clean = super::strip_meta(payload);
+        assert!(!clean.contains("_meta"));
+        assert!(clean.contains("result"));
+    }
+
+    #[test]
+    fn strip_meta_removes_meta_from_structured_content() {
+        // WS-3: реальная форма ответа extension-tools serve (rmcp structured
+        // output) — `_meta` живёт и в content[0].text, и в structuredContent.
+        // До фикса чистился только text, structuredContent доезжал до клиента.
+        let inner = r#"{"result":{"name":"X"},"_meta":{"dependent_files":["a.bsl"]}}"#;
+        let inner_escaped = serde_json::to_string(inner).unwrap();
+        let payload = format!(
+            r#"{{"content":[{{"type":"text","text":{}}}],"structuredContent":{{"_meta":{{"dependent_files":["a.bsl"]}},"result":{{"name":"X"}}}},"isError":false}}"#,
+            inner_escaped
+        );
+        // deps извлекаются ДО strip — инвалидация не страдает.
+        assert_eq!(
+            super::extract_dependent_files(&payload),
+            vec!["a.bsl".to_string()]
+        );
+        let clean = super::strip_meta(&payload);
+        assert!(!clean.contains("_meta"), "clean содержит _meta: {}", clean);
+        assert!(!clean.contains("dependent_files"));
+        // Полезная нагрузка обоих каналов цела.
+        let v: Value = serde_json::from_str(&clean).unwrap();
+        assert_eq!(v["structuredContent"]["result"]["name"], "X");
+        let inner_clean: Value =
+            serde_json::from_str(v["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(inner_clean["result"]["name"], "X");
+    }
+
+    #[test]
+    fn strip_meta_noop_without_meta() {
+        let payload = r#"{"result":[1,2,3]}"#;
+        assert_eq!(super::strip_meta(payload), payload.to_string());
+    }
+
+    #[test]
+    fn strip_meta_noop_on_invalid_json() {
+        assert_eq!(super::strip_meta("not json"), "not json".to_string());
     }
 }
