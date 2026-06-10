@@ -9,9 +9,12 @@
 //! - [`singleflight`] — координация одинаковых in-flight запросов.
 //! - [`metrics`]  — счётчики hit/miss и среднего latency бэкенда.
 //! - [`proxy`]    — главный обработчик: оркестрирует кэш + single-flight + бэкенд.
+//! - [`batch`]    — декомпозиция батчевых tools/call (names[]/full_names[]) на
+//!   одиночные под-вызовы с per-object кэшем.
 //! - [`rmcp_client`] — реализация [`BackendCaller`] через rmcp (форвард на бэкенд).
 //! - [`server`]   — `ServerHandler` прокси (приём запросов от клиента).
 
+pub mod batch;
 pub mod cache;
 pub mod config;
 pub mod dirty;

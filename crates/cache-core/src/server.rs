@@ -100,6 +100,31 @@ impl ServerHandler for ProxyServer {
         // Включим вместе с middleware на следующем шаге.
         let bypass = false;
 
+        // Батчевые вызовы mass-mode (names[]/full_names[]) режутся на одиночные
+        // под-вызовы с per-object кэшем — см. crate::batch. Хиты отдаются из
+        // кэша, в бэкенд параллельно уходят только промахи; порядок results =
+        // порядку имён. Не-батчевые инструменты — прежний путь без изменений.
+        if crate::batch::detect_batch(&tool_name, &args).is_some() {
+            return match crate::batch::handle_batch(&self.proxy, &tool_name, &args, bypass).await
+            {
+                Ok(inner) => {
+                    // Собираем CallToolResult той же формы, в которой бэкенд
+                    // отдаёт одиночные ответы (content[0].text с JSON внутри).
+                    let payload = serde_json::json!({
+                        "content": [{ "type": "text", "text": inner }]
+                    })
+                    .to_string();
+                    serde_json::from_str::<CallToolResult>(&payload).map_err(|e| {
+                        McpError::internal_error(
+                            format!("прокси: не удалось собрать батчевый CallToolResult: {e}"),
+                            None,
+                        )
+                    })
+                }
+                Err(e) => Err(proxy_error_to_mcp(e)),
+            };
+        }
+
         match self.proxy.handle(&tool_name, &args, bypass).await {
             Ok(payload) => {
                 // payload — это JSON-сериализованный CallToolResult из бэкенда.
@@ -110,35 +135,41 @@ impl ServerHandler for ProxyServer {
                     )
                 })
             }
-            Err(ProxyError::Backend(msg)) => Err(McpError::internal_error(
-                format!("backend error: {msg}"),
-                None,
-            )),
-            Err(ProxyError::Internal(msg)) => Err(McpError::internal_error(msg, None)),
-            Err(ProxyError::Frozen {
-                scope,
-                retry_after_seconds,
-            }) => {
-                // Block-режим: кэш заморожен на этот scope (обычно потому, что
-                // в 1С случилось обновление конфигурации, а локальный репо ещё
-                // не реиндексирован). Возвращаем явную ошибку с подсказкой
-                // сколько ждать — клиент LibreChat / Claude Code должен показать
-                // пользователю «обновление в процессе» и повторить позже.
-                let scope_label = if scope.is_empty() {
-                    "global".to_string()
-                } else {
-                    scope.clone()
-                };
-                let message = format!(
-                    "прокси заморожен (scope='{scope_label}'): обновление конфигурации в процессе, повторите через {retry_after_seconds} сек.",
-                );
-                let data = serde_json::json!({
-                    "frozen": true,
-                    "scope": scope,
-                    "retry_after_seconds": retry_after_seconds,
-                });
-                Err(McpError::internal_error(message, Some(data)))
-            }
+            Err(e) => Err(proxy_error_to_mcp(e)),
+        }
+    }
+}
+
+/// Маппинг [`ProxyError`] → MCP-ошибка. Общий для одиночного и батчевого путей.
+fn proxy_error_to_mcp(err: ProxyError) -> McpError {
+    match err {
+        ProxyError::Backend(msg) => {
+            McpError::internal_error(format!("backend error: {msg}"), None)
+        }
+        ProxyError::Internal(msg) => McpError::internal_error(msg, None),
+        ProxyError::Frozen {
+            scope,
+            retry_after_seconds,
+        } => {
+            // Block-режим: кэш заморожен на этот scope (обычно потому, что
+            // в 1С случилось обновление конфигурации, а локальный репо ещё
+            // не реиндексирован). Возвращаем явную ошибку с подсказкой
+            // сколько ждать — клиент LibreChat / Claude Code должен показать
+            // пользователю «обновление в процессе» и повторить позже.
+            let scope_label = if scope.is_empty() {
+                "global".to_string()
+            } else {
+                scope.clone()
+            };
+            let message = format!(
+                "прокси заморожен (scope='{scope_label}'): обновление конфигурации в процессе, повторите через {retry_after_seconds} сек.",
+            );
+            let data = serde_json::json!({
+                "frozen": true,
+                "scope": scope,
+                "retry_after_seconds": retry_after_seconds,
+            });
+            McpError::internal_error(message, Some(data))
         }
     }
 }
