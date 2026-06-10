@@ -101,6 +101,15 @@ cacheable = false  # all requests with repo=ut go directly to the backend, nothi
 
 Primary use case — federated repos under concurrent edits (when event-driven invalidation is unavailable but stale cache is also unacceptable). Default is `cacheable = true`.
 
+## Batch call decomposition (mass-mode, since 0.5.0)
+
+Batch tools/call of code-index (`get_function`/`get_class` with `names: [...]`, `get_object_structure` with `full_names: [...]`) are split by the proxy into single sub-calls: each element goes through the regular pipeline (cache, single-flight, freeze, revalidation) and is cached **per object** instead of one blob per batch. The sub-call cache key is identical to the key of a direct single call — the cache is shared both ways: a batch warms up single calls and vice versa.
+
+- Hits are served from the cache; only misses go to the backend in parallel (cap 16) — partial-hit out of the box.
+- The `{results:[...]}` response is assembled strictly in the request name order; a broken element yields `{error}` in its slot and does not fail the batch.
+- The response format is identical to serve's own mass-mode — decomposition is transparent for the client.
+- For backends without these tools (e.g. a deployment in front of rag-query) — no-op.
+
 ## Write-triggered lazy revalidation
 
 Since **0.4.0**, on top of `POST /invalidate` (sent *after* the daemon commits a reindex, ~1.5 s after the write), the proxy accepts an early `POST /mark-dirty` (sent *before* reparse) and revalidates lazily by comparing mtimes — so it serves fresh data as soon as the index catches up, without waiting for TTL and without depending on `/invalidate` delivery.
