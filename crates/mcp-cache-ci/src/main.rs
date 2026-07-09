@@ -1,4 +1,4 @@
-//! Кэширующий MCP-прокси перед `code-index serve`.
+//! Универсальный кэширующий MCP-прокси перед произвольным HTTP MCP-сервером.
 //!
 //! При старте подключается к бэкенду через rmcp `streamable-http-client`,
 //! делает handshake (`initialize` → `notifications/initialized`),
@@ -8,6 +8,8 @@
 //!
 //! Кроме `/mcp` бинарник обслуживает служебные эндпоинты `/health`,
 //! `/metrics`, `/invalidate` (см. модуль `handlers`).
+//!
+//! Имя прокси (`alias`) и имена аргументов области (`scope_args`) задаются конфигом.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,14 +35,11 @@ use cache_core::{
     RevalConfig, RmcpBackend, SingleFlight,
 };
 
-const SERVER_ALIAS: &str = "ci";
-const SCOPE_ARG_NAME: &str = "repo";
-
 mod handlers;
 mod pidlock;
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Кэш-прокси перед code-index serve")]
+#[command(version, about = "Универсальный кэш-прокси перед HTTP MCP-сервером")]
 struct Cli {
     /// Путь к TOML-конфигу. Может также быть задан через MCP_CACHE_CONFIG.
     #[arg(long, env = "MCP_CACHE_CONFIG")]
@@ -73,6 +72,7 @@ async fn main() -> Result<()> {
     if let Some(port) = cli.bind_port {
         cfg.server.bind_port = port;
     }
+    info!(alias = %cfg.server.alias, scope_args = ?cfg.server.scope_args, "конфиг загружен");
 
     let policy = load_policy(&cli.config, &cfg).await?;
 
@@ -111,8 +111,8 @@ async fn main() -> Result<()> {
     );
 
     let proxy = Arc::new(CacheProxy::new(
-        SERVER_ALIAS,
-        Some(SCOPE_ARG_NAME),
+        cfg.server.alias.clone(),
+        cfg.server.scope_args.clone(),
         policy_swap.clone(),
         cache.clone(),
         singleflight.clone(),
@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
 
     // 4) Создаём rmcp ServerHandler и оборачиваем его в StreamableHttpService.
     let proxy_server = ProxyServer::new(
-        SERVER_ALIAS,
+        cfg.server.alias.clone(),
         env!("CARGO_PKG_VERSION"),
         proxy.clone(),
         tools,
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
         cache,
         metrics,
         backend_url: cfg.backend.url.clone(),
-        server_alias: SERVER_ALIAS.to_string(),
+        server_alias: cfg.server.alias.clone(),
         freeze: freeze.clone(),
         dirty: dirty.clone(),
     };

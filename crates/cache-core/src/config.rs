@@ -47,6 +47,18 @@ impl ProxyConfig {
 /// Параметры HTTP-сервера прокси (наш биндинг).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
+    /// Имя ЭТОГО прокси. Попадает в префикс ключа кэша
+    /// (`<alias>|<scope>|<tool>|<hash>`), в метку `server` метрик Prometheus
+    /// и в текст `instructions` MCP-сервера. Обязателен: значение по умолчанию
+    /// скрывало бы ошибку конфигурации — два прокси с одинаковым alias
+    /// схлопывают метрики и делят одно пространство ключей.
+    pub alias: String,
+    /// Имена аргументов инструмента, по которым кэш делится на области.
+    /// Проверяются по порядку, берётся первое найденное строковое значение.
+    /// `["repo"]` — code-index, `["base"]` — 1c-router, `[]` или отсутствие —
+    /// бэкенд без разделения: вся выдача лежит в одной области.
+    #[serde(default)]
+    pub scope_args: Vec<String>,
     /// Только loopback или внутренний интерфейс. По правилу `mcp-deploy-procedure.md`
     /// никаких `0.0.0.0` — кроме случаев когда прокси слушает на ВМ внутри
     /// доверенной локальной сети.
@@ -187,6 +199,7 @@ mod tests {
     fn parses_minimal_config() {
         let toml = r#"
             [server]
+            alias = "ci"
             bind_host = "127.0.0.1"
             bind_port = 8013
 
@@ -194,6 +207,7 @@ mod tests {
             url = "http://127.0.0.1:8011/mcp"
         "#;
         let cfg: ProxyConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.server.alias, "ci");
         assert_eq!(cfg.server.bind_port, 8013);
         assert_eq!(cfg.backend.url, "http://127.0.0.1:8011/mcp");
         assert_eq!(cfg.backend.timeout_ms, 5000);

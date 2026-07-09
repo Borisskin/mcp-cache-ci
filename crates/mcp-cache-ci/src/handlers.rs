@@ -69,11 +69,13 @@ pub async fn metrics_json(State(state): State<AppState>) -> impl IntoResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct InvalidateRequest {
-    /// Снести записи только для указанного `repo` (scope для cache-ci).
+    /// Область кэша, записи которой снести. Родное имя параметра.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Устаревший синоним `scope` (историческое имя для code-index).
     #[serde(default)]
     pub repo: Option<String>,
-    /// Альтернативное имя поля `repo` — для совместимости с внешними клиентами,
-    /// которые используют термин `base` (например, sidecar'ы для других кэшей).
+    /// Устаревший синоним `scope` (историческое имя для 1c-router).
     #[serde(default)]
     pub base: Option<String>,
     /// Произвольный prefix ключа (например, для отладки). Имеет смысл, если
@@ -99,6 +101,7 @@ pub async fn invalidate(
     State(state): State<AppState>,
     Json(req): Json<InvalidateRequest>,
 ) -> impl IntoResponse {
+    let scope = pick_scope(&req.scope, &req.repo, &req.base);
     let removed = if req.all {
         let n = state.cache.len();
         state.cache.clear();
@@ -107,8 +110,8 @@ pub async fn invalidate(
         state.cache.invalidate_files(paths)
     } else if let Some(path) = req.file_path.as_ref() {
         state.cache.invalidate_files(std::slice::from_ref(path))
-    } else if let Some(scope) = req.repo.as_ref().or(req.base.as_ref()) {
-        let prefix = Cache::scope_prefix(&state.server_alias, scope);
+    } else if !scope.is_empty() {
+        let prefix = Cache::scope_prefix(&state.server_alias, &scope);
         state.cache.invalidate_where(|k| k.starts_with(&prefix))
     } else if let Some(prefix) = req.key_prefix {
         state.cache.invalidate_where(|k| k.starts_with(&prefix))
@@ -116,7 +119,7 @@ pub async fn invalidate(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "укажите один из параметров: repo, base, key_prefix, file_paths, file_path или all=true",
+                "error": "укажите один из параметров: scope (синонимы repo/base), key_prefix, file_paths, file_path или all=true",
             })),
         )
             .into_response();

@@ -79,13 +79,13 @@ impl Default for RevalConfig {
 
 /// Кэш-прокси: связывает кэш, политику, single-flight и backend-caller.
 ///
-/// `scope_arg_name` — имя поля в args, по которому строится scope-prefix кэш-ключа
-/// и проверяется заморозка. Для `mcp-cache-ci` это `"repo"`. Если поле в args
-/// отсутствует — scope пустой (`""`), инвалидация по `repo` такие записи не
-/// задевает (но `all:true` снесёт).
+/// `scope_args` — имена полей в args, по которым строится scope-prefix кэш-ключа
+/// и проверяется заморозка. Проверяются по порядку, берётся первое найденное
+/// строковое поле. Пустой список — scope всегда пустой (`""`); инвалидация по
+/// области такие записи не задевает (но `all:true` снесёт).
 pub struct CacheProxy<B: BackendCaller> {
     pub server_alias: String,
-    pub scope_arg_name: Option<String>,
+    pub scope_args: Vec<String>,
     pub policy: Arc<arc_swap::ArcSwap<Policy>>,
     pub cache: Arc<Cache>,
     pub singleflight: Arc<SingleFlight<String>>,
@@ -104,7 +104,7 @@ impl<B: BackendCaller> CacheProxy<B> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         server_alias: impl Into<String>,
-        scope_arg_name: Option<impl Into<String>>,
+        scope_args: Vec<String>,
         policy: Arc<arc_swap::ArcSwap<Policy>>,
         cache: Arc<Cache>,
         singleflight: Arc<SingleFlight<String>>,
@@ -116,7 +116,7 @@ impl<B: BackendCaller> CacheProxy<B> {
     ) -> Self {
         Self {
             server_alias: server_alias.into(),
-            scope_arg_name: scope_arg_name.map(Into::into),
+            scope_args,
             policy,
             cache,
             singleflight,
@@ -128,16 +128,16 @@ impl<B: BackendCaller> CacheProxy<B> {
         }
     }
 
-    /// Извлечь scope из args по `scope_arg_name`. Если `scope_arg_name` не задан
-    /// или поле отсутствует/не строка — вернуть пустую строку.
+    /// Извлечь scope из args: перебираем `scope_args` по порядку и берём первое
+    /// поле, которое есть в args и является строкой. Ничего не нашли (или список
+    /// пуст) — область пустая.
     fn extract_scope(&self, args: &Value) -> String {
-        let Some(name) = &self.scope_arg_name else {
-            return String::new();
-        };
-        args.get(name)
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string()
+        for name in &self.scope_args {
+            if let Some(s) = args.get(name).and_then(|v| v.as_str()) {
+                return s.to_string();
+            }
+        }
+        String::new()
     }
 
     /// Точка входа: вернуть ответ на (tool, args) — из кэша или из бэкенда.
@@ -521,7 +521,7 @@ mod tests {
         });
         let proxy = CacheProxy::new(
             "ci",
-            Some("repo"),
+            vec!["repo".to_string()],
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(Cache::new()),
             Arc::new(SingleFlight::new()),
@@ -566,7 +566,7 @@ mod tests {
         };
         let proxy = CacheProxy::new(
             "ci",
-            Some("repo"),
+            vec!["repo".to_string()],
             Arc::new(arc_swap::ArcSwap::from_pointee(Policy::default())),
             Arc::new(Cache::new()),
             Arc::new(SingleFlight::new()),

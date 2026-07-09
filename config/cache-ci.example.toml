@@ -9,6 +9,8 @@
 policy_path = "cache_policy_ci.toml"
 
 [server]
+alias = "ci"                                 # имя прокси: ключи кэша, метка метрик, instructions
+scope_args = ["repo"]                        # аргумент, по которому кэш делится на области
 bind_host = "127.0.0.1"
 bind_port = 8013                             # порт прокси: 8013 (зарезервирован под кэш-ci)
 

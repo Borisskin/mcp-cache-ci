@@ -63,8 +63,8 @@ impl ServerHandler for ProxyServer {
                 self.server_version.clone(),
             ))
             .with_instructions(format!(
-                "Кэширующий прокси перед бэкендом '{}'. Все вызовы tools/call \
-                 проходят через TTL-кэш. Заголовок X-Cache-Bypass=1 минует кэш.",
+                "Кэширующий прокси '{}'. Все вызовы tools/call проходят через \
+                 TTL-кэш. Заголовок X-Cache-Bypass=1 минует кэш.",
                 self.server_alias
             ))
     }

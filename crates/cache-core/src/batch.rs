@@ -198,7 +198,7 @@ mod tests {
         let freeze = FreezeController::new();
         let proxy = CacheProxy::new(
             "ci",
-            Some("repo"),
+            vec!["repo".to_string()],
             Arc::new(arc_swap::ArcSwap::from_pointee(Policy::default())),
             Arc::new(Cache::new()),
             Arc::new(SingleFlight::new()),
