@@ -1,0 +1,52 @@
+# Политика кэширования инструментов rag-query.
+#
+# ДЕФОЛТ ЗАКРЫТ: default_ttl_seconds = 0 означает, что инструмент, не упомянутый
+# ниже, НЕ кэшируется. Так новый инструмент сервера не попадает под кэш молча —
+# его надо внести в белый список осознанно. Прежний открытый дефолт (60 секунд)
+# уже привёл к кэшированию skill_search, у которого ответ зависит от состояния
+# сессии, а сам вызов пишет журнал.
+#
+# ВНИМАНИЕ: при закрытом дефолте у каждой записи белого списка ttl_seconds
+# обязателен. Секция без ttl_seconds означает время жизни 0 секунд, то есть
+# фактически отсутствие кэша.
+#
+# Намеренно НЕ кэшируются (перечислены для памяти, записей не требуют):
+#   rag_query, rag_health          — произвольный SQL и состояние базы;
+#   memory_save, write_session_summary — пишущие;
+#   skill_search                   — ответ зависит от состояния сессии (гейт
+#                                    новизны, дедуп, лимит поисков), а сам вызов
+#                                    пишет skill_search_log и тему сессии;
+#   recent_tail                    — свежий хвост сессии, кэш обесценивает смысл.
+
+default_ttl_seconds = 0
+
+# === Карточки знаний ===
+[tools.memory_read]
+ttl_seconds = 300
+
+[tools.memory_semantic_search]
+ttl_seconds = 300
+
+# === Навыки ===
+# Чтение тела навыка по имени — без побочных эффектов.
+[tools.skill_load]
+ttl_seconds = 300
+
+# === Сессии ===
+[tools.session_read]
+ttl_seconds = 300
+
+[tools.session_list]
+ttl_seconds = 60
+
+[tools.session_search]
+ttl_seconds = 60
+
+[tools.session_semantic_search]
+ttl_seconds = 300
+
+[tools.read_session_summary]
+ttl_seconds = 300
+
+[tools.read_segment]
+ttl_seconds = 300
