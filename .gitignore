@@ -22,3 +22,6 @@ __pycache__/
 
 # Локальные файлы Claude Code harness
 .claude/
+
+# Реестр исключений аудита секретов — служебный, не публикуется
+.secret-audit-allowlist
